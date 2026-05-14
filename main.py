@@ -33,7 +33,7 @@ client = Groq(
 
 MODEL_NAME = "openai/gpt-oss-120b"
 
-JUDGE0_URL = "http://134.209.215.224:2358"
+JUDGE0_URL = JUDGE0_PUBLIC_URL
 
 # =====================================
 # FASTAPI
