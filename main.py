@@ -33,7 +33,7 @@ client = Groq(
 
 MODEL_NAME = "openai/gpt-oss-120b"
 
-JUDGE0_URL = JUDGE0_PUBLIC_URL
+JUDGE0_URL = os.getenv("JUDGE0_PUBLIC_URL")
 
 # =====================================
 # FASTAPI

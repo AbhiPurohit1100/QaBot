@@ -379,10 +379,7 @@ if generate_button:
     <div class="score-number">
         {score}/{total}
     </div>
-
-    <p class="score-label">
-        Testcases Passed
-    </p>
+    Testcases Passed
 </div>
 """
 
