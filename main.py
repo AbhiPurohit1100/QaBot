@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from typing import TypedDict, List, Dict, Any
@@ -32,6 +33,13 @@ client = Groq(
 )
 
 MODEL_NAME = "openai/gpt-oss-120b"
+
+# =====================================
+# TPM THROTTLE CONFIG
+# =====================================
+
+INTER_LLM_DELAY = 5  # seconds between LLM calls to spread token usage
+MAX_RETRIES = 5      # max retries on rate limit (429)
 
 JUDGE0_URL = os.getenv("JUDGE0_PUBLIC_URL")
 
@@ -71,6 +79,8 @@ class GraphState(TypedDict):
     raw_testcase_response: str
 
     testcases: List[Dict[str, Any]]
+
+    merged_code: str
 
     judge0_results: List[Dict[str, Any]]
 
@@ -227,7 +237,7 @@ Based on the following understanding and dependent context:
 {understanding}
 
 Generate:
-1. 10 testcases
+1. 4 testcases
 2. Include normal + edge cases
 3. Each testcase must contain:
    - stdin
@@ -264,6 +274,22 @@ Return ONLY:
 PASS
 or
 FAIL
+"""
+
+BATCH_VALIDATION_PROMPT = """
+You are a testcase validation agent.
+
+You will receive multiple expected/actual output pairs.
+For each pair, determine if they are logically equivalent.
+
+Return ONLY a JSON array of results in the same order.
+Each result must be exactly "PASS" or "FAIL".
+
+Example response:
+["PASS", "FAIL", "PASS"]
+
+Pairs to validate:
+{pairs}
 """
 
 IMPROVEMENT_PROMPT = """
@@ -352,28 +378,79 @@ Score:
 {score}/{total}
 """
 
+MERGE_PROMPT = """
+You are a code merging agent.
+
+You are given a MAIN CODE file and one or more DEPENDENCY FILES.
+Your job is to produce a SINGLE self-contained executable file that combines all of them.
+
+Rules:
+1. Inline all dependency code into the main code so it runs as one file.
+2. Remove or replace import/require/include statements that reference the dependency files.
+3. Place dependency code (functions, classes, constants) BEFORE the main code that uses them.
+4. Preserve the exact stdin/stdout behavior of the main code.
+5. Do not add any extra output, comments, or explanations.
+6. Do not use markdown formatting.
+7. Return ONLY the final merged executable code.
+8. Keep the code in the same programming language.
+
+Detected Language:
+{language}
+
+MAIN CODE:
+{code}
+
+DEPENDENCY FILES:
+{context}
+"""
+
 # =====================================
 # HELPERS
 # =====================================
 
-def invoke_llm(prompt: str):
+_last_llm_call_time = 0
 
-    completion = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
-        temperature=0.1,
-        max_completion_tokens=4096,
-        top_p=1,
-        reasoning_effort="medium",
-        stream=False
-    )
+def invoke_llm(prompt: str, max_tokens: int = 4096):
+    """Call the LLM with automatic retry on rate limits and inter-call throttling."""
+    global _last_llm_call_time
 
-    return completion.choices[0].message.content.strip()
+    # Inter-call delay to spread token usage across the TPM window
+    elapsed = time.time() - _last_llm_call_time
+    if elapsed < INTER_LLM_DELAY:
+        wait_time = INTER_LLM_DELAY - elapsed
+        print(f"[TPM] Throttling: waiting {wait_time:.1f}s before next LLM call")
+        time.sleep(wait_time)
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            completion = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                temperature=0.1,
+                max_completion_tokens=max_tokens,
+                top_p=1,
+                reasoning_effort="medium",
+                stream=False
+            )
+
+            _last_llm_call_time = time.time()
+            return completion.choices[0].message.content.strip()
+
+        except Exception as e:
+            error_str = str(e).lower()
+            if "rate_limit" in error_str or "429" in error_str or "rate limit" in error_str:
+                wait = min(15 * (2 ** attempt), 90)
+                print(f"[TPM] Rate limited (attempt {attempt + 1}/{MAX_RETRIES}). Waiting {wait}s...")
+                time.sleep(wait)
+            else:
+                raise
+
+    raise Exception("LLM rate limit exceeded after maximum retries")
 
 
 def normalize_language(language: str):
@@ -643,9 +720,36 @@ def parser_agent(state: GraphState):
     }
 
 
+def merge_agent(state: GraphState):
+
+    context = state.get("context", "").strip()
+
+    # If no dependency files, skip merge — just use the main code as-is
+    if not context:
+
+        return {
+            "merged_code": state["code"]
+        }
+
+    prompt = MERGE_PROMPT.format(
+        language=state["language"],
+        code=state["code"],
+        context=context
+    )
+
+    merged = invoke_llm(prompt)
+
+    merged = clean_code_response(merged)
+
+    return {
+        "merged_code": merged
+    }
+
+
 def judge0_agent(state: GraphState):
 
-    code = state["code"]
+    # Use merged code (main + dependencies) for execution
+    code = state.get("merged_code") or state["code"]
 
     language = state["language"]
 
@@ -886,42 +990,87 @@ def judge0_agent(state: GraphState):
 def validation_agent(state: GraphState):
 
     validated = []
-
     score = 0
 
-    for tc in state["judge0_results"]:
+    # Pre-classify: separate exact matches, errors, and mismatches
+    pre_results = []  # (index, passed | None)
+    mismatch_indices = []  # indices needing LLM validation
+    mismatch_pairs = []    # pairs to send to LLM
+
+    for idx, tc in enumerate(state["judge0_results"]):
 
         expected = tc["expected_output"].strip()
-
         actual = tc["actual_output"].strip()
-
         status = tc.get("status", "")
-
         stderr = tc.get("stderr", "")
-
         compile_output = tc.get("compile_output", "")
 
         if status != "Accepted" or stderr or compile_output:
-
-            passed = False
+            pre_results.append((idx, False))
 
         elif expected == actual:
-
-            passed = True
+            pre_results.append((idx, True))
 
         else:
+            pre_results.append((idx, None))  # needs LLM
+            mismatch_indices.append(idx)
+            mismatch_pairs.append({
+                "pair_number": len(mismatch_pairs) + 1,
+                "expected": expected,
+                "actual": actual
+            })
 
+    # Batch LLM call for all mismatches (single call instead of N calls)
+    llm_results = {}
+
+    if mismatch_pairs:
+
+        if len(mismatch_pairs) == 1:
+            # Single mismatch — use original simple prompt
             prompt = VALIDATION_PROMPT.format(
-                expected=expected,
-                actual=actual
+                expected=mismatch_pairs[0]["expected"],
+                actual=mismatch_pairs[0]["actual"]
             )
+            result = invoke_llm(prompt, max_tokens=128)
+            llm_results[mismatch_indices[0]] = result.strip().upper() == "PASS"
 
-            result = invoke_llm(prompt)
+        else:
+            # Multiple mismatches — batch into one call
+            pairs_text = json.dumps(mismatch_pairs, indent=2)
+            prompt = BATCH_VALIDATION_PROMPT.format(pairs=pairs_text)
+            result = invoke_llm(prompt, max_tokens=256)
 
-            passed = result.strip().upper() == "PASS"
+            try:
+                # Parse JSON array like ["PASS", "FAIL", "PASS"]
+                match = re.search(r'\[.*\]', result, re.DOTALL)
+                if match:
+                    verdicts = json.loads(match.group())
+                else:
+                    verdicts = []
+
+                for i, idx in enumerate(mismatch_indices):
+                    if i < len(verdicts):
+                        llm_results[idx] = verdicts[i].strip().upper() == "PASS"
+                    else:
+                        llm_results[idx] = False  # fallback to FAIL
+
+            except Exception:
+                # If parsing fails, fall back to all FAIL
+                for idx in mismatch_indices:
+                    llm_results[idx] = False
+
+    # Assemble final results
+    for idx, tc in enumerate(state["judge0_results"]):
+
+        # Find the pre-classification
+        _, pre_passed = pre_results[idx]
+
+        if pre_passed is None:
+            passed = llm_results.get(idx, False)
+        else:
+            passed = pre_passed
 
         if passed:
-
             score += 1
 
         validated.append({
@@ -937,6 +1086,20 @@ def validation_agent(state: GraphState):
 
 def improvement_agent(state: GraphState):
 
+    # Trim judge0_results: only include full details for failing testcases
+    trimmed_judge0 = []
+    for idx, r in enumerate(state["judge0_results"]):
+        validated = state["validated_results"][idx] if idx < len(state["validated_results"]) else {}
+        if validated.get("passed", False):
+            # For passing tests, only include stdin and status
+            trimmed_judge0.append({
+                "stdin": r.get("stdin", ""),
+                "status": r.get("status", ""),
+                "passed": True
+            })
+        else:
+            trimmed_judge0.append(r)
+
     prompt = IMPROVEMENT_PROMPT.format(
         language=state["language"],
         understanding=state["understanding"],
@@ -947,7 +1110,7 @@ def improvement_agent(state: GraphState):
             indent=2
         ),
         judge0_results=json.dumps(
-            state["judge0_results"],
+            trimmed_judge0,
             indent=2
         ),
         validated_results=json.dumps(
@@ -1028,6 +1191,11 @@ def build_graph():
     )
 
     graph.add_node(
+        "merge_agent",
+        merge_agent
+    )
+
+    graph.add_node(
         "judge0_agent",
         judge0_agent
     )
@@ -1068,6 +1236,11 @@ def build_graph():
 
     graph.add_edge(
         "parser_agent",
+        "merge_agent"
+    )
+
+    graph.add_edge(
+        "merge_agent",
         "judge0_agent"
     )
 
@@ -1148,3 +1321,86 @@ def generate_testcases(req: CodeRequest):
         "results":
             result["validated_results"]
     }
+
+
+# =====================================
+# STREAMING ROUTE (SSE)
+# =====================================
+
+# Maps agent node names to frontend step keys
+AGENT_TO_STEP = {
+    "context_agent": "understanding",
+    "language_agent": "language",
+    "testcase_agent": "testcase",
+    "parser_agent": "testcase",       # parser is part of testcase step
+    "merge_agent": "merge",
+    "judge0_agent": "judge0",
+    "validation_agent": "validation",
+    "improvement_agent": "improvement",
+    "explanation_agent": "explanation"
+}
+
+@app.post("/generate-testcases-stream")
+def generate_testcases_stream(req: CodeRequest):
+
+    def event_stream():
+
+        state = {
+            "code": req.code,
+            "original_code": req.code,
+            "context": req.context,
+            "improved_code": req.code,
+            "explanation": ""
+        }
+
+        # Define the pipeline steps in order
+        agents = [
+            ("context_agent", context_agent),
+            ("language_agent", language_agent),
+            ("testcase_agent", testcase_agent),
+            ("parser_agent", parser_agent),
+            ("merge_agent", merge_agent),
+            ("judge0_agent", judge0_agent),
+            ("validation_agent", validation_agent),
+            ("improvement_agent", improvement_agent),
+            ("explanation_agent", explanation_agent),
+        ]
+
+        for agent_name, agent_fn in agents:
+
+            step_key = AGENT_TO_STEP.get(agent_name, agent_name)
+
+            # Send "running" event
+            yield f"data: {json.dumps({'type': 'step_running', 'step': step_key})}\n\n"
+
+            try:
+                result = agent_fn(state)
+                state.update(result)
+            except Exception as e:
+                yield f"data: {json.dumps({'type': 'error', 'step': step_key, 'message': str(e)})}\n\n"
+                return
+
+            # Send "completed" event
+            yield f"data: {json.dumps({'type': 'step_complete', 'step': step_key})}\n\n"
+
+        # Send final result
+        final_result = {
+            "type": "result",
+            "success": True,
+            "detected_language": state["language"],
+            "language_id": LANGUAGE_MAP[state["language"]],
+            "score": state["score"],
+            "total_testcases": len(state["validated_results"]),
+            "original_code": state["original_code"],
+            "context": state.get("context", ""),
+            "improved_code": state.get("improved_code", state["original_code"]),
+            "explanation": state.get("explanation", ""),
+            "results": state["validated_results"]
+        }
+
+        yield f"data: {json.dumps(final_result)}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream"
+    )
