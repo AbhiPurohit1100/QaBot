@@ -1,6 +1,7 @@
 import streamlit as st
 import requests
 import time
+import json
 
 # =========================================
 # CONFIG
@@ -307,7 +308,7 @@ st.divider()
 st.subheader("📎 Dependency / Context Files")
 
 st.caption(
-    "Add middleware, controllers, routes, validators, models, helpers, or any related files here. These are not executed by Judge0; they help the AI understand the full behavior."
+    "Add middleware, controllers, routes, validators, models, helpers, or any related files here."
 )
 
 top_col1, top_col2 = st.columns([1, 4])
@@ -496,10 +497,19 @@ def render_all_steps(active_step=None, completed_steps=None):
             ]
         },
         {
+            "key": "merge",
+            "title": "Merging Code Files",
+            "points": [
+                "Combining main code with dependencies",
+                "Inlining imports and requires",
+                "Creating single executable file"
+            ]
+        },
+        {
             "key": "judge0",
             "title": "Executing on Judge0",
             "points": [
-                "Compiling submitted code",
+                "Compiling merged code",
                 "Running generated testcases",
                 "Collecting execution outputs"
             ]
@@ -560,6 +570,12 @@ def render_all_steps(active_step=None, completed_steps=None):
 
 
 # =========================================
+# CONFIG
+# =========================================
+
+API_STREAM_URL = "http://127.0.0.1:8000/generate-testcases-stream"
+
+# =========================================
 # MAIN FLOW
 # =========================================
 
@@ -575,7 +591,7 @@ if generate_button:
 
     status_placeholder = st.empty()
 
-    # Initial pending state
+    # Initial state: all pending
 
     with status_placeholder.container():
 
@@ -584,38 +600,24 @@ if generate_button:
             completed_steps=[]
         )
 
-    time.sleep(0.3)
-
-    # Since backend is one blocking request, we cannot know exact live step.
-    # This is the most honest UI state during the actual request.
-
-    status_placeholder.empty()
-
-    with status_placeholder.container():
-
-        render_all_steps(
-            active_step="validation",
-            completed_steps=[
-                "understanding",
-                "language",
-                "testcase",
-                "judge0"
-            ]
-        )
-
     # =========================================
-    # API CALL
+    # STREAMING API CALL
     # =========================================
 
     try:
 
+        completed_steps = []
+        active_step = None
+        data = None
+
         response = requests.post(
-            API_URL,
+            API_STREAM_URL,
             json={
                 "code": code,
                 "context": context
             },
-            timeout=300
+            timeout=600,
+            stream=True
         )
 
         if response.status_code != 200:
@@ -626,9 +628,76 @@ if generate_button:
 
             st.stop()
 
-        data = response.json()
+        # Read SSE events line by line
 
-        if not data.get("success"):
+        for line in response.iter_lines(decode_unicode=True):
+
+            if not line:
+                continue
+
+            if not line.startswith("data: "):
+                continue
+
+            payload = line[6:]  # strip "data: "
+
+            try:
+                event = json.loads(payload)
+            except Exception:
+                continue
+
+            event_type = event.get("type", "")
+
+            if event_type == "step_running":
+
+                active_step = event.get("step")
+
+                status_placeholder.empty()
+
+                with status_placeholder.container():
+
+                    render_all_steps(
+                        active_step=active_step,
+                        completed_steps=completed_steps
+                    )
+
+            elif event_type == "step_complete":
+
+                step = event.get("step")
+
+                if step and step not in completed_steps:
+                    completed_steps.append(step)
+
+                active_step = None
+
+                status_placeholder.empty()
+
+                with status_placeholder.container():
+
+                    render_all_steps(
+                        active_step=None,
+                        completed_steps=completed_steps
+                    )
+
+            elif event_type == "error":
+
+                step = event.get("step", "unknown")
+                message = event.get("message", "Unknown error")
+
+                st.error(
+                    f"Error at step '{step}': {message}"
+                )
+
+                st.stop()
+
+            elif event_type == "result":
+
+                data = event
+
+        # =========================================
+        # CHECK RESULT
+        # =========================================
+
+        if not data or not data.get("success"):
 
             st.error(
                 "Generation failed."
@@ -650,6 +719,7 @@ if generate_button:
                     "understanding",
                     "language",
                     "testcase",
+                    "merge",
                     "judge0",
                     "validation",
                     "improvement",
