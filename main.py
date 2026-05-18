@@ -56,6 +56,8 @@ class GraphState(TypedDict):
 
     code: str
 
+    original_code: str
+
     understanding: str
 
     raw_testcase_response: str
@@ -67,6 +69,8 @@ class GraphState(TypedDict):
     validated_results: List[Dict[str, Any]]
 
     score: int
+
+    improved_code: str
 
 # =====================================
 # LANGUAGE MAP
@@ -104,12 +108,12 @@ Based on the following understanding:
 {understanding}
 
 Generate:
-1. 6 testcases
+1. 10 testcases
 2. Include normal + edge cases
 3. Each testcase must contain:
    - stdin
    - expected_stdout
-
+4. It should include all edge cases like x/0 or null pointer dereferencing etc etc
 Return STRICT JSON ONLY.
 
 Example:
@@ -137,6 +141,43 @@ Return ONLY:
 PASS
 or
 FAIL
+"""
+IMPROVEMENT_PROMPT = """
+You are an expert competitive programming code improvement agent.
+
+The user's code was executed against generated testcases using Judge0.
+
+Your job:
+1. Read the problem understanding.
+2. Read the original code.
+3. Read all generated testcases.
+4. Read Judge0 execution results.
+5. Read validation results showing PASS/FAIL.
+6. Suggest one better corrected version of the code.
+7. Preserve the same input/output format.
+8. Return ONLY the full corrected code.
+9. Do not explain anything.
+10. Do not use markdown.
+
+Important:
+- Do not assume the suggested code will be re-tested.
+- Your output must be the best final suggested code based on the available results.
+- If the original code already passes all testcases, still return the original code unchanged.
+
+Problem Understanding:
+{understanding}
+
+Original Code:
+{code}
+
+Generated Testcases:
+{testcases}
+
+Judge0 Results:
+{judge0_results}
+
+Validated Results:
+{validated_results}
 """
 
 # =====================================
@@ -187,6 +228,24 @@ def detect_language(code: str):
 
     return "python"
 
+
+def clean_code_response(text: str):
+
+    text = text.strip()
+
+    text = re.sub(
+        r"^```[a-zA-Z]*",
+        "",
+        text
+    ).strip()
+
+    text = re.sub(
+        r"```$",
+        "",
+        text
+    ).strip()
+
+    return text
 # =====================================
 # AGENTS
 # =====================================
@@ -224,6 +283,80 @@ def parser_agent(state: GraphState):
     return {
         "testcases": testcases
     }
+
+
+def improvement_agent(state: GraphState):
+
+    prompt = IMPROVEMENT_PROMPT.format(
+        understanding=state["understanding"],
+        code=state["original_code"],
+        testcases=json.dumps(
+            state["testcases"],
+            indent=2
+        ),
+        judge0_results=json.dumps(
+            state["judge0_results"],
+            indent=2
+        ),
+        validated_results=json.dumps(
+            state["validated_results"],
+            indent=2
+        )
+    )
+
+    improved_code = invoke_llm(prompt)
+
+    improved_code = clean_code_response(improved_code)
+
+    return {
+        "improved_code": improved_code
+    }
+
+    current_score = state["score"]
+    total = len(state["validated_results"])
+
+    iteration = state.get("iteration", 0)
+
+    # If already passed all testcases, stop improving
+    if current_score == total:
+
+        return {
+            "improved_code": state["code"],
+            "iteration": iteration
+        }
+
+    # If already tried 2 times, stop
+    if iteration >= 2:
+
+        return {
+            "improved_code": state["code"],
+            "iteration": iteration
+        }
+
+    failed_results = [
+        result for result in state["validated_results"]
+        if not result["passed"]
+    ]
+
+    prompt = IMPROVEMENT_PROMPT.format(
+        understanding=state["understanding"],
+        code=state["code"],
+        results=json.dumps(
+            failed_results,
+            indent=2
+        )
+    )
+
+    improved_code = invoke_llm(prompt)
+
+    improved_code = clean_code_response(improved_code)
+
+    return {
+        "code": improved_code,
+        "improved_code": improved_code,
+        "iteration": iteration + 1
+    }
+
 
 # =====================================
 # JUDGE0 AGENT
@@ -519,6 +652,11 @@ def build_graph():
         validation_agent
     )
 
+    graph.add_node(
+        "improvement_agent",
+        improvement_agent
+    )
+
     graph.set_entry_point(
         "context_agent"
     )
@@ -545,13 +683,89 @@ def build_graph():
 
     graph.add_edge(
         "validation_agent",
+        "improvement_agent"
+    )
+
+    graph.add_edge(
+        "improvement_agent",
         END
     )
 
     return graph.compile()
 
-workflow = build_graph()
+    graph = StateGraph(GraphState)
 
+    graph.add_node(
+        "context_agent",
+        context_agent
+    )
+
+    graph.add_node(
+        "testcase_agent",
+        testcase_agent
+    )
+
+    graph.add_node(
+        "parser_agent",
+        parser_agent
+    )
+
+    graph.add_node(
+        "judge0_agent",
+        judge0_agent
+    )
+
+    graph.add_node(
+        "validation_agent",
+        validation_agent
+    )
+
+    graph.add_node(
+        "improvement_agent",
+        improvement_agent
+    )
+
+    graph.set_entry_point(
+        "context_agent"
+    )
+
+    graph.add_edge(
+        "context_agent",
+        "testcase_agent"
+    )
+
+    graph.add_edge(
+        "testcase_agent",
+        "parser_agent"
+    )
+
+    graph.add_edge(
+        "parser_agent",
+        "judge0_agent"
+    )
+
+    graph.add_edge(
+        "judge0_agent",
+        "validation_agent"
+    )
+
+    graph.add_conditional_edges(
+        "validation_agent",
+        should_continue_improving,
+        {
+            "retry": "improvement_agent",
+            "end": END
+        }
+    )
+
+    graph.add_edge(
+        "improvement_agent",
+        "judge0_agent"
+    )
+
+    return graph.compile()
+
+workflow = build_graph()
 # =====================================
 # ROUTE
 # =====================================
@@ -560,7 +774,9 @@ workflow = build_graph()
 def generate_testcases(req: CodeRequest):
 
     result = workflow.invoke({
-        "code": req.code
+        "code": req.code,
+        "original_code": req.code,
+        "improved_code": req.code
     })
 
     return {
@@ -572,6 +788,45 @@ def generate_testcases(req: CodeRequest):
 
         "total_testcases":
             len(result["validated_results"]),
+
+        "original_code":
+            result["original_code"],
+
+        "improved_code":
+            result.get(
+                "improved_code",
+                result["original_code"]
+            ),
+
+        "results":
+            result["validated_results"]
+    }
+
+    result = workflow.invoke({
+        "code": req.code,
+        "original_code": req.code,
+        "iteration": 0,
+        "improved_code": req.code
+    })
+
+    return {
+
+        "success": True,
+
+        "score":
+            result["score"],
+
+        "total_testcases":
+            len(result["validated_results"]),
+
+        "iterations_used":
+            result.get("iteration", 0),
+
+        "original_code":
+            result["original_code"],
+
+        "improved_code":
+            result.get("improved_code", result["code"]),
 
         "results":
             result["validated_results"]

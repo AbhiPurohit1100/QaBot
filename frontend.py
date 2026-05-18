@@ -33,14 +33,40 @@ textarea {
     font-family: monospace !important;
 }
 
-/* cards */
+/* status cards */
 
-.testcase-card {
-    border: 1px solid #31333F;
+.status-card {
     border-radius: 16px;
-    padding: 24px;
-    margin-bottom: 28px;
-    background-color: #0E1117;
+    padding: 22px 24px;
+    margin-bottom: 18px;
+    border: 1px solid;
+}
+
+.status-card h3 {
+    margin-top: 0;
+    margin-bottom: 14px;
+}
+
+.status-card ul {
+    margin-bottom: 0;
+}
+
+.status-pending {
+    background-color: #111827;
+    border-color: #374151;
+    color: #d1d5db;
+}
+
+.status-running {
+    background-color: #450a0a;
+    border-color: #ef4444;
+    color: #fecaca;
+}
+
+.status-completed {
+    background-color: #052e16;
+    border-color: #22c55e;
+    color: #bbf7d0;
 }
 
 /* labels */
@@ -101,6 +127,8 @@ textarea {
     margin-top: 12px;
 }
 
+
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -111,7 +139,7 @@ textarea {
 st.title("🧠 AI Testcase Generator")
 
 st.caption(
-    "LangGraph + Groq + Judge0 powered intelligent testcase validation"
+    "LangGraph + Groq + Judge0 powered intelligent testcase validation and code improvement"
 )
 
 # =========================================
@@ -149,31 +177,133 @@ code = st.text_area(
 # =========================================
 
 generate_button = st.button(
-    "🚀 Generate & Validate Testcases",
+    "🚀 Generate, Validate & Improve Code",
     use_container_width=True
 )
 
 # =========================================
-# STATUS BOX
+# STATUS CARD FUNCTION
 # =========================================
 
-def render_status_box(
+def render_status_card(
     title,
     points,
+    status="pending",
     icon="⏳"
 ):
 
-    with st.container(border=True):
+    status_class = {
+        "pending": "status-pending",
+        "running": "status-running",
+        "completed": "status-completed"
+    }.get(status, "status-pending")
 
-        st.markdown(
-            f"### {icon} {title}"
+    points_html = ""
+
+    for point in points:
+
+        points_html += f"<li>{point}</li>"
+
+    st.markdown(
+        f"""
+<div class="status-card {status_class}">
+    <h3>{icon} {title}</h3>
+    <ul>
+        {points_html}
+    </ul>
+</div>
+""",
+        unsafe_allow_html=True
+    )
+
+# =========================================
+# RENDER ALL STATUS CARDS
+# =========================================
+
+def render_all_steps(active_step=None, completed_steps=None):
+
+    if completed_steps is None:
+        completed_steps = []
+
+    steps = [
+        {
+            "key": "understanding",
+            "title": "Understanding Code",
+            "icon": "🧠",
+            "points": [
+                "Detecting programming language",
+                "Understanding input/output flow",
+                "Extracting logic",
+                "Identifying edge cases"
+            ]
+        },
+        {
+            "key": "testcase",
+            "title": "Generating Testcases",
+            "icon": "⚙️",
+            "points": [
+                "Creating normal cases",
+                "Creating edge cases",
+                "Creating boundary cases",
+                "Predicting expected outputs"
+            ]
+        },
+        {
+            "key": "judge0",
+            "title": "Executing on Judge0",
+            "icon": "🧪",
+            "points": [
+                "Compiling submitted code",
+                "Running generated testcases",
+                "Collecting execution outputs"
+            ]
+        },
+        {
+            "key": "validation",
+            "title": "Validating Outputs",
+            "icon": "🔍",
+            "points": [
+                "Comparing expected outputs",
+                "Checking semantic equivalence",
+                "Generating score"
+            ]
+        },
+        {
+            "key": "improvement",
+            "title": "Improvement Agent",
+            "icon": "🛠️",
+            "points": [
+                "Checking failed testcases",
+                "Comparing expected vs actual output",
+                "Suggesting better corrected code",
+                "Retrying for maximum 2 iterations"
+            ]
+        }
+    ]
+
+    for step in steps:
+
+        if step["key"] in completed_steps:
+
+            status = "completed"
+            icon = "✅"
+
+        elif step["key"] == active_step:
+
+            status = "running"
+            icon = "🔴"
+
+        else:
+
+            status = "pending"
+            icon = "⚪"
+
+        render_status_card(
+            step["title"],
+            step["points"],
+            status=status,
+            icon=icon
         )
-
-        for point in points:
-
-            st.write(
-                f"• {point}"
-            )
 
 # =========================================
 # MAIN FLOW
@@ -189,83 +319,37 @@ if generate_button:
 
         st.stop()
 
-    # =========================================
-    # PLACEHOLDERS
-    # =========================================
+    status_placeholder = st.empty()
 
-    understanding_placeholder = st.empty()
-    testcase_placeholder = st.empty()
-    judge0_placeholder = st.empty()
-    validation_placeholder = st.empty()
+    # Initial pending state
 
-    # =========================================
-    # UNDERSTANDING
-    # =========================================
+    with status_placeholder.container():
 
-    with understanding_placeholder.container():
-
-        render_status_box(
-            "Understanding Code",
-            [
-                "Detecting programming language",
-                "Understanding input/output flow",
-                "Extracting business logic",
-                "Identifying edge cases"
-            ],
-            "🧠"
+        render_all_steps(
+            active_step=None,
+            completed_steps=[]
         )
 
-    time.sleep(0.5)
+    time.sleep(0.4)
 
-    # =========================================
-    # TESTCASE GENERATION
-    # =========================================
+    # Understanding running
 
-    with testcase_placeholder.container():
+# =========================================
+# BACKEND PIPELINE RUNNING
+# =========================================
 
-        render_status_box(
-            "Generating Intelligent Testcases",
-            [
-                "Creating normal cases",
-                "Creating edge cases",
-                "Creating boundary cases",
-                "Predicting expected outputs"
-            ],
-            "⚙️"
+    status_placeholder.empty()
+
+    with status_placeholder.container():
+
+        render_all_steps(
+            active_step="validation",
+            completed_steps=[
+                "understanding",
+                "testcase",
+                "judge0"
+            ]
         )
-
-    # =========================================
-    # JUDGE0
-    # =========================================
-
-    with judge0_placeholder.container():
-
-        render_status_box(
-            "Executing on Judge0",
-            [
-                "Compiling submitted code",
-                "Running generated testcases",
-                "Collecting execution outputs"
-            ],
-            "⏳"
-        )
-
-    # =========================================
-    # VALIDATION
-    # =========================================
-
-    with validation_placeholder.container():
-
-        render_status_box(
-            "Validating Outputs",
-            [
-                "Comparing expected outputs",
-                "Checking semantic equivalence",
-                "Generating final score"
-            ],
-            "⏳"
-        )
-
     # =========================================
     # API CALL
     # =========================================
@@ -277,7 +361,7 @@ if generate_button:
             json={
                 "code": code
             },
-            timeout=240
+            timeout=300
         )
 
         if response.status_code != 200:
@@ -299,63 +383,22 @@ if generate_button:
             st.stop()
 
         # =========================================
-        # UPDATE STATUS
+        # FINAL COMPLETED STATE
         # =========================================
 
-        understanding_placeholder.empty()
+        status_placeholder.empty()
 
-        with understanding_placeholder.container():
+        with status_placeholder.container():
 
-            render_status_box(
-                "Code Understanding Complete",
-                [
-                    "Logic analyzed successfully",
-                    "Inputs and outputs extracted",
-                    "Edge cases identified"
-                ],
-                "✅"
-            )
-
-        testcase_placeholder.empty()
-
-        with testcase_placeholder.container():
-
-            render_status_box(
-                "Testcases Generated",
-                [
-                    "Edge cases generated",
-                    "Boundary cases generated",
-                    "Expected outputs generated"
-                ],
-                "✅"
-            )
-
-        judge0_placeholder.empty()
-
-        with judge0_placeholder.container():
-
-            render_status_box(
-                "Judge0 Execution Complete",
-                [
-                    "Code compiled successfully",
-                    "All testcases executed",
-                    "Runtime outputs collected"
-                ],
-                "✅"
-            )
-
-        validation_placeholder.empty()
-
-        with validation_placeholder.container():
-
-            render_status_box(
-                "Validation Complete",
-                [
-                    "Outputs compared",
-                    "Semantic validation completed",
-                    "Final score generated"
-                ],
-                "✅"
+            render_all_steps(
+                active_step=None,
+                completed_steps=[
+                    "understanding",
+                    "testcase",
+                    "judge0",
+                    "validation",
+                    "improvement"
+                ]
             )
 
         # =========================================
@@ -370,6 +413,17 @@ if generate_button:
 
         results = data["results"]
 
+
+        original_code = data.get(
+            "original_code",
+            code
+        )
+
+        improved_code = data.get(
+            "improved_code",
+            original_code
+        )
+
         # =========================================
         # SCORE
         # =========================================
@@ -379,7 +433,9 @@ if generate_button:
     <div class="score-number">
         {score}/{total}
     </div>
-    Testcases Passed
+    <div class="score-label">
+        Testcases Passed
+    </div>
 </div>
 """
 
@@ -387,6 +443,38 @@ if generate_button:
             score_html,
             unsafe_allow_html=True
         )
+
+        # =========================================
+        # CODE COMPARISON
+        # =========================================
+
+        st.subheader(
+            "🛠️ Code Improvement Result"
+        )
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+
+            st.markdown(
+                "### Original Code"
+            )
+
+            st.code(
+                original_code,
+                language="java"
+            )
+
+        with col2:
+
+            st.markdown(
+                "### Improved Code"
+            )
+
+            st.code(
+                improved_code,
+                language="java"
+            )
 
         # =========================================
         # TESTCASE RESULTS
@@ -439,8 +527,6 @@ if generate_button:
                     f"## 🧪 Testcase #{idx + 1}"
                 )
 
-                # INPUT
-
                 st.markdown(
                     '<div class="label">Input</div>',
                     unsafe_allow_html=True
@@ -450,8 +536,6 @@ if generate_button:
                     stdin,
                     language="text"
                 )
-
-                # EXPECTED OUTPUT
 
                 st.markdown(
                     '<div class="label">Expected Output</div>',
@@ -463,8 +547,6 @@ if generate_button:
                     language="text"
                 )
 
-                # ACTUAL OUTPUT
-
                 st.markdown(
                     '<div class="label">Judge0 Output</div>',
                     unsafe_allow_html=True
@@ -475,8 +557,6 @@ if generate_button:
                     language="text"
                 )
 
-                # STATUS
-
                 st.markdown(
                     '<div class="label">Judge0 Status</div>',
                     unsafe_allow_html=True
@@ -486,8 +566,6 @@ if generate_button:
                     judge0_status,
                     language="text"
                 )
-
-                # STDERR
 
                 if stderr:
 
@@ -501,8 +579,6 @@ if generate_button:
                         language="text"
                     )
 
-                # COMPILE OUTPUT
-
                 if compile_output:
 
                     st.markdown(
@@ -514,8 +590,6 @@ if generate_button:
                         compile_output,
                         language="text"
                     )
-
-                # PASS FAIL
 
                 if passed:
 
