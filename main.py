@@ -227,7 +227,7 @@ Based on the following understanding and dependent context:
 {understanding}
 
 Generate:
-1. 10 testcases
+1. 6 testcases
 2. Include normal + edge cases
 3. Each testcase must contain:
    - stdin
