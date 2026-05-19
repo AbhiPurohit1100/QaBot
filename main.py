@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-
+from openai import AzureOpenAI
 from typing import TypedDict, List, Dict, Any
 #hi
 from langgraph.graph import StateGraph, END
@@ -27,12 +27,20 @@ http_client = httpx.Client(
     timeout=120.0
 )
 
-client = Groq(
-    api_key=os.getenv("GROQ_API_KEY"),
-    http_client=http_client
-)
+# client = Groq(
+#     api_key=os.getenv("GROQ_API_KEY"),
+#     http_client=http_client
+# )
+# MODEL_NAME = "openai/gpt-oss-120b"
+client = AzureOpenAI(
+        api_key=os.getenv("API_KEY"),
+        azure_endpoint=os.getenv("ENDPOINT"),
+        api_version="2024-12-01-preview",
+        http_client=httpx.Client(verify=False)
+    )
 
-MODEL_NAME = "openai/gpt-oss-120b"
+
+MODEL_NAME= "gpt-4.1-mini"
 
 # =====================================
 # TPM THROTTLE CONFIG
@@ -237,7 +245,7 @@ Based on the following understanding and dependent context:
 {understanding}
 
 Generate:
-1. 4 testcases
+1. 8 testcases
 2. Include normal + edge cases
 3. Each testcase must contain:
    - stdin
@@ -434,7 +442,7 @@ def invoke_llm(prompt: str, max_tokens: int = 4096):
                 temperature=0.1,
                 max_completion_tokens=max_tokens,
                 top_p=1,
-                reasoning_effort="medium",
+                # reasoning_effort="medium",
                 stream=False
             )
 
